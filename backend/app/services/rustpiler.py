@@ -1,10 +1,9 @@
 from pathlib import Path
 from pydantic import BaseModel, ConfigDict
-import subprocess
+import asyncio
 import tempfile
+import shutil
 import os
-
-DOCKER_IMAGE = "dilan/rustpiler:latest"
 
 
 class CompileOptions(BaseModel):
@@ -19,12 +18,14 @@ class CompileOptions(BaseModel):
     asm: bool = False
 
 
+# limit concurrent executions
+semaphore = asyncio.Semaphore(4)
+
+
 def validate_options(opts: CompileOptions):
-    # asm requires code_gen
     if opts.asm and not opts.code_gen:
         raise ValueError("--asm requires code_gen (-c)")
 
-    # run requires code_gen
     if opts.run and not opts.code_gen:
         raise ValueError("-r requires code_gen (-c)")
 
@@ -47,55 +48,74 @@ def build_args(input_path: str, opts: CompileOptions) -> list[str]:
     return args
 
 
-def execute(file_bytes: bytes, opts) -> dict:
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".rnr") as tmp:
-        tmp.write(file_bytes)
-        tmp_path = tmp.name
+async def execute(file_bytes: bytes, opts: CompileOptions) -> dict:
+    validate_options(opts)
 
-    with tempfile.TemporaryDirectory() as out_dir:
-        out_dir_path = Path(out_dir)
-        asm_host_path = out_dir_path / "out.asm"
+    async with semaphore:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir_path = Path(tmpdir)
 
-        try:
+            # write input file
+            input_path = tmpdir_path / "input.rnr"
+            input_path.write_bytes(file_bytes)
+
+            # output file
+            asm_path = tmpdir_path / "out.asm"
+
+            # copy binary into jail
+            shutil.copy("/usr/local/bin/rustpiler", tmpdir_path / "rustpiler")
+
+            # build args using jail paths
             cli_args = build_args("/input.rnr", opts)
 
-            # if asm requested → force container path
             if opts.asm:
-                cli_args += ["--asm", "/out/out.asm"]
+                cli_args += ["--asm", "/out.asm"]
 
-            result = subprocess.run(
-                [
-                    "docker",
-                    "run",
-                    "--rm",
-                    "--memory=64m",
-                    "--cpus=0.5",
-                    "--pids-limit=64",
-                    "--network=none",
-                    "--read-only",
-                    "-v",
-                    f"{tmp_path}:/input.rnr:ro",
-                    "-v",
-                    f"{out_dir}:/out",
-                    DOCKER_IMAGE,
-                    *cli_args,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=5,
+            nsjail_cfg = (
+                os.getenv("BACKEND_ROOT", "/backend") + "/nsjail.cfg",
+            )  # change for Docker later
+
+            cmd = [
+                "nsjail",
+                "--config",
+                nsjail_cfg,
+                "--",
+                "/rustpiler",
+                *cli_args,
+            ]
+
+            print(" ".join(cmd))  # debug
+
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                cwd=tmpdir,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
 
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(), timeout=5
+                )
+            except asyncio.TimeoutError:
+                process.kill()
+                return {
+                    "success": False,
+                    "output": "",
+                    "error": "Execution timed out",
+                    "assembly": None,
+                    "returncode": -1,
+                }
+
             asm_content = None
-            if opts.asm and asm_host_path.exists():
-                asm_content = asm_host_path.read_text()
+            if opts.asm and asm_path.exists():
+                asm_content = asm_path.read_text()
 
             return {
-                "success": result.returncode == 0,
-                "output": result.stdout,
-                "error": result.stderr,
+                "success": process.returncode == 0,
+                "output": stdout.decode(),
+                "error": stderr.decode(),
                 "assembly": asm_content,
-                "returncode": result.returncode,
+                "returncode": process.returncode,
             }
-
-        finally:
-            os.remove(tmp_path)

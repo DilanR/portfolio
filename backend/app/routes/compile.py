@@ -18,4 +18,4 @@ async def compile(file: UploadFile = File(...), options: str = Form(...)):
 
     content = await file.read()
 
-    return run_rustpiler(content, opts)
+    return await run_rustpiler(content, opts)
