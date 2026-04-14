@@ -66,7 +66,7 @@ RUN apt-get update && apt-get install -y \
   && rm -rf /var/lib/apt/lists/*
 
 # copy rustpiler
-COPY --from=builder /build/rustpiler/target/release/rustpiler /usr/local/bin/rustpiler
+COPY --from=builder /build/rustpiler/target/x86_64-unknown-linux-musl/release/rustpiler /usr/local/bin/rustpiler
 
 # copy nsjail binary
 COPY --from=nsjail-builder /build/nsjail/nsjail /usr/local/bin/nsjail
@@ -76,5 +76,11 @@ COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY backend/app ./app
+
+COPY backend/nsjail.cfg ./app
+
+ENV RUSTPILER_BIN=/usr/local/bin/rustpiler
+ENV NSJAIL_CFG=/app/app/nsjail.cfg
+ENV TMP_ROOT=/tmp
 
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5000"]
