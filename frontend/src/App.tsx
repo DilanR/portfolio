@@ -8,9 +8,8 @@ type Options = {
   asm: boolean;
 };
 export default function App() {
-  const [code, setCode] = useState(`
-fn main() -> i32 {
-  let x mut = 1;
+  const [code, setCode] = useState(`fn main() -> i32 {
+  let mut x = 1;
   x = x + 1;
   x
 }`);
@@ -47,7 +46,7 @@ fn main() -> i32 {
       formData.append("file", file);
       formData.append("options", JSON.stringify(options));
 
-      const res = await fetch("http://localhost:5000/compile", {
+      const res = await fetch("http://localhost:5000/api/compile", {
         method: "POST",
         body: formData,
       });
