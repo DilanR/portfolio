@@ -83,4 +83,7 @@ ENV RUSTPILER_BIN=/usr/local/bin/rustpiler
 ENV NSJAIL_CFG=/app/app/nsjail.cfg
 ENV TMP_ROOT=/tmp
 
+
+EXPOSE 5000
+
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5000"]

@@ -1,5 +1,6 @@
 services:
   backend:
+    container_name: backend
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -12,18 +13,25 @@ services:
     cap_add:
       - SYS_ADMIN
     security_opt:
+      # Currently our sandbox and backend runs from same container this is not safe,
+      # because sane seccomp setting are not feasible.
+      # However the only current service lacks the capability of interacting with IO other than stdout.
+      # So far this is safe enough, later I need to split responsibility and make a proper sandbox.
       - seccomp:unconfined
+
+  frontend:
+    container_name: frontend 
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args: 
+        - VITE_API_URL=http://backend:5000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
 
   redis:
     image: redis:7
     ports:
       - "6379:6379"
-
-  frontend:
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile
-    ports:
-      - "3000:3000"
-    depends_on:
-      - backend

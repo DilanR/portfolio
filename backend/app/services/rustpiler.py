@@ -64,7 +64,6 @@ async def execute(file_bytes: bytes, opts: CompileOptions) -> dict:
 
                 rc = process.returncode
                 stderr_text = stderr.decode()
-                print(stderr_text)
                 if rc is None:
                     raise RuntimeError("Process did not terminate properly")
                 if rc < 0:
@@ -83,7 +82,6 @@ async def execute(file_bytes: bytes, opts: CompileOptions) -> dict:
 
             except asyncio.TimeoutError:
                 process.kill()
-                print("timeout")
                 await process.wait()
                 return {
                     "success": False,
