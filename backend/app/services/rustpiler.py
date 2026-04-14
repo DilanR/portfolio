@@ -1,58 +1,20 @@
 from pathlib import Path
-from pydantic import BaseModel, ConfigDict
 import asyncio
 import tempfile
-import shutil
 import os
 
-
-class CompileOptions(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    type_check: bool = False
-    virtual_machine: bool = False
-    code_gen: bool = False
-    run: bool = False
-
-    ast: bool = False
-    asm: bool = False
-
+from app.services.opts import CompileOptions, validate_options, build_args
+from app.core.config import TMP_ROOT, NSJAIL_CFG
 
 # limit concurrent executions
 semaphore = asyncio.Semaphore(4)
-
-
-def validate_options(opts: CompileOptions):
-    if opts.asm and not opts.code_gen:
-        raise ValueError("--asm requires code_gen (-c)")
-
-    if opts.run and not opts.code_gen:
-        raise ValueError("-r requires code_gen (-c)")
-
-
-def build_args(input_path: str, opts: CompileOptions) -> list[str]:
-    args = ["-i", input_path]
-
-    if opts.type_check:
-        args.append("-t")
-
-    if opts.virtual_machine:
-        args.append("-v")
-
-    if opts.code_gen:
-        args.append("-c")
-
-    if opts.run:
-        args.append("-r")
-
-    return args
 
 
 async def execute(file_bytes: bytes, opts: CompileOptions) -> dict:
     validate_options(opts)
 
     async with semaphore:
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory(dir=TMP_ROOT) as tmpdir:
             tmpdir_path = Path(tmpdir)
 
             # write input file
@@ -62,8 +24,8 @@ async def execute(file_bytes: bytes, opts: CompileOptions) -> dict:
             # output file
             asm_path = tmpdir_path / "out.asm"
 
-            # copy binary into jail
-            shutil.copy("/usr/local/bin/rustpiler", tmpdir_path / "rustpiler")
+            # link binary into jail
+            os.link(TMP_ROOT / "rustpiler", tmpdir_path / "rustpiler")
 
             # build args using jail paths
             cli_args = build_args("/input.rnr", opts)
@@ -71,20 +33,21 @@ async def execute(file_bytes: bytes, opts: CompileOptions) -> dict:
             if opts.asm:
                 cli_args += ["--asm", "/out.asm"]
 
-            nsjail_cfg = (
-                os.getenv("BACKEND_ROOT", "/backend") + "/nsjail.cfg",
-            )  # change for Docker later
-
             cmd = [
                 "nsjail",
+                "--really_quiet",
+                "--log",
+                "tmp/nsjail.log",
                 "--config",
-                nsjail_cfg,
+                str(NSJAIL_CFG),
+                "--chroot",
+                tmpdir,
                 "--",
                 "/rustpiler",
                 *cli_args,
             ]
 
-            print(" ".join(cmd))  # debug
+            # print(" ".join(cmd))  # debug
 
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -98,14 +61,36 @@ async def execute(file_bytes: bytes, opts: CompileOptions) -> dict:
                 stdout, stderr = await asyncio.wait_for(
                     process.communicate(), timeout=5
                 )
+
+                rc = process.returncode
+                stderr_text = stderr.decode()
+                print(stderr_text)
+                if rc is None:
+                    raise RuntimeError("Process did not terminate properly")
+                if rc < 0:
+                    signal = -rc
+
+                    if signal == 6:
+                        error = "Stack overflow"
+                    elif signal == 9:
+                        error = "Execution killed (timeout or limit)"
+                    elif signal == 11:
+                        error = "Segmentation fault"
+                    else:
+                        error = f"Process terminated by signal {signal}"
+                else:
+                    error = stderr_text
+
             except asyncio.TimeoutError:
                 process.kill()
+                print("timeout")
+                await process.wait()
                 return {
                     "success": False,
                     "output": "",
                     "error": "Execution timed out",
                     "assembly": None,
-                    "returncode": -1,
+                    "returncode": 1,
                 }
 
             asm_content = None
@@ -115,7 +100,7 @@ async def execute(file_bytes: bytes, opts: CompileOptions) -> dict:
             return {
                 "success": process.returncode == 0,
                 "output": stdout.decode(),
-                "error": stderr.decode(),
+                "error": error if rc != 0 else "",
                 "assembly": asm_content,
-                "returncode": process.returncode,
+                "returncode": rc,
             }
